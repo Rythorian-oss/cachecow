@@ -1,0 +1,97 @@
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Diagnostics;
+using Serilog;
+
+namespace CacheCow;
+
+public static partial class CacheCowCore 
+{
+    public static string ResolvePathForCurrentOS(string win, string mac, string lin)
+    {
+        string rawPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? win :
+                         RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? mac : lin;
+
+        if (string.IsNullOrEmpty(rawPath)) return string.Empty;
+
+        if (rawPath.StartsWith("~/"))
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            rawPath = Path.Combine(home, rawPath.Substring(2));
+        }
+
+        return Environment.ExpandEnvironmentVariables(rawPath);
+    }
+
+    public static void FlushDnsCache()
+    {
+        try
+        {
+            string file = ""; string args = "";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { file = "ipconfig"; args = "/flushdns"; }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) { file = "killall"; args = "-HUP mDNSResponder"; }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) { file = "resolvectl"; args = "flush-caches"; }
+
+            if (!string.IsNullOrEmpty(file))
+            {
+                using var proc = Process.Start(new ProcessStartInfo { FileName = file, Arguments = args, CreateNoWindow = true, UseShellExecute = false });
+                proc?.WaitForExit();
+                Log.Information("[OPTIMIZE] DNS Cache flushed natively.");
+            }
+        }
+        catch { Log.Warning("Could not flush DNS cache. Elevated privileges may be required."); }
+    }
+
+    public static void EmptyTrash()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            SHEmptyRecycleBin(IntPtr.Zero, null, 0x00000001 | 0x00000002 | 0x00000004);
+        }
+        else
+        {
+            string trashPath = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) 
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".Trash")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "Trash", "files");
+            
+            _ = DeepCleanDirectoryAsync(trashPath, false, CancellationToken.None).AsTask();
+        }
+    }
+
+    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int SHEmptyRecycleBin(IntPtr hwnd, string? pszRootPath, uint dwFlags);
+
+    public static async ValueTask DeepCleanDirectoryAsync(string sourcePath, bool isWhatIf, CancellationToken token) 
+    {
+        try 
+        {
+            var options = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true };
+            var files = Directory.EnumerateFiles(sourcePath, "*", options);
+            
+            await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (file, ct) => {
+                try 
+                {
+                    FileInfo info = new FileInfo(file);
+                    long length = info.Length;
+                    
+                    if (!isWhatIf) 
+                    {
+                        if ((info.Attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly) 
+                            info.Attributes = FileAttributes.Normal;
+                        
+                        info.Delete();
+                    }
+
+                    Interlocked.Add(ref Program.TotalBytesFreed, length);
+                    Interlocked.Increment(ref Program.TotalFilesDeleted);
+                } 
+                catch { /* Access Denied - Silently skip */ }
+            });
+            Log.Information("[CLEAN] Processed cache block: {Path}", sourcePath);
+        } 
+        catch (Exception ex) { Log.Error("Failed to enumerate {Path}: {Msg}", sourcePath, ex.Message); }
+    }
+}
