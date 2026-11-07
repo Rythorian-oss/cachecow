@@ -1,8 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Configuration;
 using Serilog;
 using Velopack;
 
@@ -10,115 +12,127 @@ namespace CacheCow;
 
 class Program
 {
+    // Global metrics for the dashboard
+    public static long TotalBytesFreed = 0;
+    public static int TotalFilesDeleted = 0;
+
     static async Task Main(string[] args)
     {
-        // Initialize Structured Enterprise Logging
         Log.Logger = new LoggerConfiguration()
-            .WriteTo.Console()
-            .WriteTo.File(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CacheCow", "logs", "cachecow_.json"), rollingInterval: RollingInterval.Day)
+            .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+            .WriteTo.File(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CacheCow", "logs", "sys_.log"), rollingInterval: RollingInterval.Day)
             .CreateLogger();
+
+        using var cts = new CancellationTokenSource();
+        Task? dashboardTask = null;
 
         try
         {
-            Log.Information("=== Cache Cow Enterprise Starting ===");
+            Log.Information("=== Cache Cow Deep Optimizer Starting ===");
             bool isDryRun = args.Contains("--dry-run");
 
-            // Initialize Velopack Auto-Updater
-            VelopackApp.Build().Run();
-            
-            // Load Professional JSON Configuration
-            IConfiguration config = new ConfigurationBuilder()
-                .SetBasePath(Directory.GetCurrentDirectory())
-                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                .Build();
+            // 1. Start Real-Time Memory Dashboard
+            dashboardTask = Task.Run(() => RunMemoryDashboard(cts.Token));
 
-            // Background Update Check (Non-blocking)
-            if (config.GetValue<bool>("UpdateSettings:EnableAutoUpdate"))
+            // 2. Initialize Auto-Updater safely
+            try { VelopackApp.Build().Run(); } catch { /* Ignore if not packaged */ }
+
+            // 3. Load Configuration via AOT Source Generator
+            string configJson = await File.ReadAllTextAsync("appsettings.json", cts.Token);
+            AppConfig config = JsonSerializer.Deserialize(configJson, AppConfigContext.Default.AppConfig) 
+                               ?? throw new InvalidOperationException("Failed to parse configuration.");
+
+            // 4. Background Update Check
+            if (config.UpdateSettings.EnableAutoUpdate && !string.IsNullOrWhiteSpace(config.UpdateSettings.ReleaseChannel))
             {
-                var updateUrl = config.GetValue<string>("UpdateSettings:ReleaseChannel");
-                _ = Task.Run(() => CheckForUpdatesAsync(updateUrl));
+                _ = Task.Run(async () => {
+                    try {
+                        var mgr = new UpdateManager(config.UpdateSettings.ReleaseChannel);
+                        var newVer = await mgr.CheckForUpdatesAsync();
+                        if (newVer != null) {
+                            Log.Information("Update {Ver} found. Downloading...", newVer.Version);
+                            await mgr.DownloadUpdatesAsync(newVer);
+                            mgr.ApplyUpdatesAndRestart(newVer);
+                        }
+                    } catch { Log.Warning("Auto-updater unreachable."); }
+                });
             }
 
-            // Execution Loop
-            var targets = config.GetSection("Targets").Get<CacheTarget[]>() ?? Array.Empty<CacheTarget>();
-            long totalBytesProcessed = 0;
+            // 5. System Optimization
+            if (config.Optimization.FlushDnsCache && !isDryRun)
+            {
+                CacheCowCore.FlushDnsCache();
+            }
 
-            foreach (var target in targets)
+            // 6. Deep Cache Execution Engine
+            foreach (var target in config.Targets)
             {
                 if (target.IsProtected)
                 {
-                    Log.Warning("[BLOCKED] {TargetName} is protected data. Skipping.", target.Name);
+                    Log.Warning("[GUARD] {TargetName} is protected. Bypassing.", target.Name);
                     continue;
                 }
 
-                string resolvedPath = CacheCowCore.ResolvePathForCurrentOS(target);
-
+                string resolvedPath = CacheCowCore.ResolvePathForCurrentOS(target.WindowsPath, target.MacPath, target.LinuxPath);
+                
                 if (target.Type == "SystemObject" && resolvedPath == "RecycleBin")
                 {
-                    if (!isDryRun)
-                    {
-                        CacheCowCore.EmptyTrash();
-                        Log.Information("[✓] System Trash/Recycle Bin Emptied.");
-                    }
-                    else
-                    {
-                        Log.Information("[WhatIf] Would empty System Trash/Recycle Bin.");
-                    }
+                    if (!isDryRun) CacheCowCore.EmptyTrash();
+                    Log.Information("[TRASH] System Recycle Bin / Trash Emptied.");
                     continue;
                 }
 
                 if (target.Type == "Directory" && Directory.Exists(resolvedPath))
                 {
-                    var result = CacheCowCore.ProcessDirectory(resolvedPath, isDryRun);
-                    totalBytesProcessed += result.BytesProcessed;
-                    Log.Information("[✓] Processed {Count} files in {TargetName} ({Bytes} bytes).", result.FilesMoved, target.Name, result.BytesProcessed);
+                    await CacheCowCore.DeepCleanDirectoryAsync(resolvedPath, isDryRun, cts.Token);
                 }
             }
 
-            Log.Information("=== Cache Cow Complete | Total Bytes: {TotalBytes} ===", totalBytesProcessed);
+            // 7. Duplicate Scanner Engine
+            if (config.DuplicateScanner.Enabled)
+            {
+                using var duplicateEngine = new DuplicateEngine();
+                await duplicateEngine.ScanAndCleanAsync(config.DuplicateScanner, isDryRun, cts.Token);
+            }
+
+            // Halt dashboard for final report
+            cts.Cancel();
+            await dashboardTask;
+
+            Log.Information("=== OPTIMIZATION COMPLETE ===");
+            Log.Information("Total Space Freed: {TotalMB} MB", Math.Round(TotalBytesFreed / 1048576.0, 2));
+            Log.Information("Total Files Removed: {Files}", TotalFilesDeleted);
         }
         catch (Exception ex)
         {
-            Log.Fatal(ex, "A fatal exception occurred during Cache Cow execution.");
+            Log.Fatal(ex, "System exception occurred.");
         }
         finally
         {
-            Log.CloseAndFlush();
+            cts.Cancel();
+            await Log.CloseAndFlushAsync();
             if (args.Contains("--pause"))
             {
-                Console.WriteLine("Press any key to exit...");
+                Console.WriteLine("\nPress any key to exit...");
                 Console.ReadKey();
             }
         }
     }
 
-    private static async Task CheckForUpdatesAsync(string? url)
+    private static async Task RunMemoryDashboard(CancellationToken token)
     {
-        if (string.IsNullOrEmpty(url)) return;
-        try
+        using var process = Process.GetCurrentProcess();
+        while (!token.IsCancellationRequested)
         {
-            var mgr = new UpdateManager(url);
-            var newVersion = await mgr.CheckForUpdatesAsync();
-            if (newVersion != null)
-            {
-                Log.Information("Downloading update: {Version}", newVersion.Version);
-                await mgr.DownloadUpdatesAsync(newVersion);
-                mgr.ApplyUpdatesAndRestart(newVersion);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Failed to check for updates.");
+            process.Refresh();
+            long workingSetMb = process.WorkingSet64 / 1048576;
+            long gcMemoryMb = GC.GetTotalMemory(false) / 1048576;
+            double freedMb = TotalBytesFreed / 1048576.0;
+
+            // Updates the console window title to act as a dashboard without disrupting Serilog's console output
+            Console.Title = $"Cache Cow Optimizer | Working Set: {workingSetMb}MB | GC Heap: {gcMemoryMb}MB | Freed: {freedMb:F2}MB | Files: {TotalFilesDeleted}";
+            
+            await Task.Delay(500, token);
         }
     }
-}
-
-public class CacheTarget
-{
-    public string Name { get; set; } = string.Empty;
-    public string WindowsPath { get; set; } = string.Empty;
-    public string MacPath { get; set; } = string.Empty;
-    public string LinuxPath { get; set; } = string.Empty;
-    public string Type { get; set; } = string.Empty;
-    public bool IsProtected { get; set; }
 }
