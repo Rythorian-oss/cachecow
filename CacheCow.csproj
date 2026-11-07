@@ -5,21 +5,16 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- Compiles to a single, standalone native binary without needing the .NET runtime installed -->
     <PublishAot>true</PublishAot>
-    <!-- Triggers Windows to ask for Administrator privileges natively (No more PowerShell bypass hacks) -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Enterprise Configuration -->
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
-    <!-- Structured Enterprise Logging -->
     <PackageReference Include="Serilog" Version="3.1.1" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
-    <!-- Cross-Platform Auto Updater -->
     <PackageReference Include="Velopack" Version="3.0.14" />
   </ItemGroup>
 
