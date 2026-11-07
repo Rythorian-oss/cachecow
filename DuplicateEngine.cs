@@ -22,7 +22,6 @@ public class DuplicateEngine : IDisposable
         var filesByExtAndSize = new ConcurrentDictionary<string, List<string>>();
         var extensionsToScan = new HashSet<string>(config.TargetExtensions.Select(e => e.ToLowerInvariant()));
 
-        // Step 1: Rapid Metadata Scan (Groups by Exact Size and Extension)
         foreach (var dir in config.TargetDirectories)
         {
             string resolved = CacheCowCore.ResolvePathForCurrentOS(dir, dir, dir);
@@ -48,7 +47,6 @@ public class DuplicateEngine : IDisposable
             }
         }
 
-        // Filter out unique items - only process groups with >1 file sharing the exact same size & extension
         var potentialDuplicates = filesByExtAndSize.Values.Where(list => list.Count > 1).ToList();
         
         if (!potentialDuplicates.Any())
@@ -57,7 +55,6 @@ public class DuplicateEngine : IDisposable
             return;
         }
 
-        // Step 2: Zero-Allocation Hashing & Deletion
         await Parallel.ForEachAsync(potentialDuplicates, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (group, ct) =>
         {
             var hashedFiles = new Dictionary<ulong, string>();
@@ -65,11 +62,10 @@ public class DuplicateEngine : IDisposable
             foreach (var file in group)
             {
                 ulong hash = await ComputeHashZeroAllocationAsync(file, ct);
-                if (hash == 0) continue; // Skip read errors
+                if (hash == 0) continue;
 
-                if (hashedFiles.TryGetValue(hash, out string existingFile))
+                if (hashedFiles.TryGetValue(hash, out string? existingFile))
                 {
-                    // Exact duplicate detected
                     try
                     {
                         long size = new FileInfo(file).Length;
@@ -91,14 +87,15 @@ public class DuplicateEngine : IDisposable
 
     private async ValueTask<ulong> ComputeHashZeroAllocationAsync(string filePath, CancellationToken ct)
     {
-        byte[] buffer = _pool.Rent(1024 * 1024); // 1MB rented chunk (Zero GC allocation)
+        byte[] buffer = _pool.Rent(1024 * 1024);
         try
         {
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
             var xxHash = new XxHash64();
             
             int bytesRead;
-            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, ct)) > 0)
+            // Using buffer.AsMemory() triggers the struct-based ValueTask overload, preventing Task<int> allocations.
+            while ((bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct)) > 0)
             {
                 xxHash.Append(new ReadOnlySpan<byte>(buffer, 0, bytesRead));
             }
@@ -107,17 +104,16 @@ public class DuplicateEngine : IDisposable
         }
         catch
         {
-            return 0; // Return 0 on permission denial or locked files
+            return 0;
         }
         finally
         {
-            _pool.Return(buffer); // Prevent memory leaks
+            _pool.Return(buffer);
         }
     }
 
     public void Dispose()
     {
-        // Suppress finalization as ArrayPool handles its own memory lifecycle natively
         GC.SuppressFinalize(this);
     }
 }
