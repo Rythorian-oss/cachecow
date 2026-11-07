@@ -1,0 +1,43 @@
+name: Cache Cow Release Pipeline
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            ext: .exe
+          - os: macos-latest
+            rid: osx-x64
+            ext: ""
+          - os: ubuntu-latest
+            rid: linux-x64
+            ext: ""
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish Binary
+        run: dotnet publish CacheCow.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishAot=true -o ./publish
+
+      - name: Zip Artifact
+        run: tar -czvf cachecow-${{ matrix.rid }}.tar.gz -C ./publish CacheCow${{ matrix.ext }} appsettings.json
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: cachecow-${{ matrix.rid }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
