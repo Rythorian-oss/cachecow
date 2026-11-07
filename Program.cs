@@ -12,7 +12,6 @@ namespace CacheCow;
 
 class Program
 {
-    // Global metrics for the dashboard
     public static long TotalBytesFreed = 0;
     public static int TotalFilesDeleted = 0;
 
@@ -31,18 +30,14 @@ class Program
             Log.Information("=== Cache Cow Deep Optimizer Starting ===");
             bool isDryRun = args.Contains("--dry-run");
 
-            // 1. Start Real-Time Memory Dashboard
             dashboardTask = Task.Run(() => RunMemoryDashboard(cts.Token));
 
-            // 2. Initialize Auto-Updater safely
             try { VelopackApp.Build().Run(); } catch { /* Ignore if not packaged */ }
 
-            // 3. Load Configuration via AOT Source Generator
             string configJson = await File.ReadAllTextAsync("appsettings.json", cts.Token);
             AppConfig config = JsonSerializer.Deserialize(configJson, AppConfigContext.Default.AppConfig) 
                                ?? throw new InvalidOperationException("Failed to parse configuration.");
 
-            // 4. Background Update Check
             if (config.UpdateSettings.EnableAutoUpdate && !string.IsNullOrWhiteSpace(config.UpdateSettings.ReleaseChannel))
             {
                 _ = Task.Run(async () => {
@@ -58,13 +53,11 @@ class Program
                 });
             }
 
-            // 5. System Optimization
             if (config.Optimization.FlushDnsCache && !isDryRun)
             {
                 CacheCowCore.FlushDnsCache();
             }
 
-            // 6. Deep Cache Execution Engine
             foreach (var target in config.Targets)
             {
                 if (target.IsProtected)
@@ -88,14 +81,12 @@ class Program
                 }
             }
 
-            // 7. Duplicate Scanner Engine
             if (config.DuplicateScanner.Enabled)
             {
                 using var duplicateEngine = new DuplicateEngine();
                 await duplicateEngine.ScanAndCleanAsync(config.DuplicateScanner, isDryRun, cts.Token);
             }
 
-            // Halt dashboard for final report
             cts.Cancel();
             await dashboardTask;
 
@@ -129,8 +120,11 @@ class Program
             long gcMemoryMb = GC.GetTotalMemory(false) / 1048576;
             double freedMb = TotalBytesFreed / 1048576.0;
 
-            // Updates the console window title to act as a dashboard without disrupting Serilog's console output
-            Console.Title = $"Cache Cow Optimizer | Working Set: {workingSetMb}MB | GC Heap: {gcMemoryMb}MB | Freed: {freedMb:F2}MB | Files: {TotalFilesDeleted}";
+            try 
+            {
+                Console.Title = $"Cache Cow Optimizer | WS: {workingSetMb}MB | GC: {gcMemoryMb}MB | Freed: {freedMb:F2}MB | Files: {TotalFilesDeleted}";
+            }
+            catch { /* Fail silently if terminal does not support Window titles */ }
             
             await Task.Delay(500, token);
         }
