@@ -12,7 +12,7 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // 1. Initialize Structured Enterprise Logging
+        // Initialize Structured Enterprise Logging
         Log.Logger = new LoggerConfiguration()
             .WriteTo.Console()
             .WriteTo.File(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CacheCow", "logs", "cachecow_.json"), rollingInterval: RollingInterval.Day)
@@ -23,23 +23,23 @@ class Program
             Log.Information("=== Cache Cow Enterprise Starting ===");
             bool isDryRun = args.Contains("--dry-run");
 
-            // 2. Initialize Velopack Auto-Updater
+            // Initialize Velopack Auto-Updater
             VelopackApp.Build().Run();
             
-            // 3. Load Professional JSON Configuration
+            // Load Professional JSON Configuration
             IConfiguration config = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
                 .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                 .Build();
 
-            // 4. Background Update Check (Non-blocking)
+            // Background Update Check (Non-blocking)
             if (config.GetValue<bool>("UpdateSettings:EnableAutoUpdate"))
             {
                 var updateUrl = config.GetValue<string>("UpdateSettings:ReleaseChannel");
                 _ = Task.Run(() => CheckForUpdatesAsync(updateUrl));
             }
 
-            // 5. Execution Loop
+            // Execution Loop
             var targets = config.GetSection("Targets").Get<CacheTarget[]>() ?? Array.Empty<CacheTarget>();
             long totalBytesProcessed = 0;
 
