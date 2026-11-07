@@ -1,34 +1,22 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Serilog;
 
 namespace CacheCow;
 
-public class CacheCowResult 
-{
-    public long BytesProcessed = 0;
-    public int FilesMoved = 0;
-    public int Errors = 0;
-}
-
 public static class CacheCowCore 
 {
-    public static string ResolvePathForCurrentOS(CacheTarget target)
+    public static string ResolvePathForCurrentOS(string win, string mac, string lin)
     {
-        string rawPath = string.Empty;
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            rawPath = target.WindowsPath;
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            rawPath = target.MacPath;
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            rawPath = target.LinuxPath;
+        string rawPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? win :
+                         RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? mac : lin;
 
         if (string.IsNullOrEmpty(rawPath)) return string.Empty;
 
-        // Resolve cross-platform home directory mapping
         if (rawPath.StartsWith("~/"))
         {
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -38,59 +26,72 @@ public static class CacheCowCore
         return Environment.ExpandEnvironmentVariables(rawPath);
     }
 
+    public static void FlushDnsCache()
+    {
+        try
+        {
+            string file = ""; string args = "";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { file = "ipconfig"; args = "/flushdns"; }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) { file = "killall"; args = "-HUP mDNSResponder"; }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) { file = "resolvectl"; args = "flush-caches"; }
+
+            if (!string.IsNullOrEmpty(file))
+            {
+                using var proc = Process.Start(new ProcessStartInfo { FileName = file, Arguments = args, CreateNoWindow = true, UseShellExecute = false });
+                proc?.WaitForExit();
+                Log.Information("[OPTIMIZE] DNS Cache flushed natively.");
+            }
+        }
+        catch { Log.Warning("Could not flush DNS cache. Elevated privileges may be required."); }
+    }
+
     public static void EmptyTrash()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            // Windows native implementation
             SHEmptyRecycleBin(IntPtr.Zero, null, 0x00000001 | 0x00000002 | 0x00000004);
         }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        else
         {
-            // macOS native implementation
-            string trashPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".Trash");
-            ProcessDirectory(trashPath, isWhatIf: false);
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-        {
-            // Linux native implementation (FreeDesktop standard)
-            string trashPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "Trash", "files");
-            ProcessDirectory(trashPath, isWhatIf: false);
+            string trashPath = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) 
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".Trash")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "Trash", "files");
+            
+            _ = DeepCleanDirectoryAsync(trashPath, false, CancellationToken.None).AsTask();
         }
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern int SHEmptyRecycleBin(IntPtr hwnd, string? pszRootPath, uint dwFlags);
 
-    public static CacheCowResult ProcessDirectory(string sourcePath, bool isWhatIf) 
+    public static async ValueTask DeepCleanDirectoryAsync(string sourcePath, bool isWhatIf, CancellationToken token) 
     {
-        CacheCowResult result = new CacheCowResult();
-        if (!Directory.Exists(sourcePath)) return result;
-
         try 
         {
-            var enumOptions = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true };
-            var files = Directory.EnumerateFiles(sourcePath, "*", enumOptions);
+            var options = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true };
+            var files = Directory.EnumerateFiles(sourcePath, "*", options);
             
-            Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, file => {
-                try {
+            await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (file, ct) => {
+                try 
+                {
                     FileInfo info = new FileInfo(file);
-                    Interlocked.Add(ref result.BytesProcessed, info.Length);
+                    long length = info.Length;
                     
                     if (!isWhatIf) 
                     {
                         if ((info.Attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly) 
                             info.Attributes = FileAttributes.Normal;
                         
-                        File.Delete(file);
-                        Interlocked.Increment(ref result.FilesMoved);
+                        info.Delete();
                     }
+
+                    Interlocked.Add(ref Program.TotalBytesFreed, length);
+                    Interlocked.Increment(ref Program.TotalFilesDeleted);
                 } 
-                catch { Interlocked.Increment(ref result.Errors); }
+                catch { /* Access Denied - Silently skip */ }
             });
+            Log.Information("[CLEAN] Processed cache block: {Path}", sourcePath);
         } 
-        catch { Interlocked.Increment(ref result.Errors); }
-        
-        return result;
+        catch (Exception ex) { Log.Error("Failed to enumerate {Path}: {Msg}", sourcePath, ex.Message); }
     }
 }
