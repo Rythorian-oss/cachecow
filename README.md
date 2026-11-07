@@ -1,4 +1,5 @@
 Cache Cow 🐄
+
 Cache Cow is an enterprise-grade, cross-platform system and cache cleaning utility. Originally built as a PowerShell script suite, it has been fully architected into a standalone, compiled .NET 8 application. It provides safe, rapid, configuration-driven cleanup of system temp files, developer caches, and application data while strictly guarding protected browser and user profiles.
 
 🚀 Key Features
